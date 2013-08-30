@@ -1,0 +1,33 @@
+################################################################
+# script for running quality control on the input fastq files
+# Usage: run_QC R1.fastq
+# version: 1.0
+# date: 2013-03-04
+# Author: Xianjun Dong
+# Requirement: install fastqc and fastq-mcf in the $PATH
+################################################################
+
+#!/bin/sh
+
+[ "$#" -gt "0" ] || die "Must have at least 1 argument!";
+
+string1=""; string2="";
+for read in "$@"; do string1="$read $string1"; string2="-o filtered/$read $string2"; done
+
+###### QC
+[ -d fastqc ] || mkdir -p fastqc
+echo -e "\tfastqc --outdir fastqc --extract --threads 4 -f fastq $string1"
+fastqc --outdir fastqc --extract --threads 8 --quiet -f fastq $string1
+rm fastqc/*fastqc.zip
+
+###### trim low quality part + remove adaptor sequence
+[ -d filtered ] || mkdir filtered
+echo -e "\tfastq-mcf $string2 -l 16 -q 15 -w 4 -x 20 -u -P 33 adaptor.fa $string1"
+~/bin/ea-utils.1.1.2-537/fastq-mcf $string2 -l 16 -q 15 -w 4 -x 20 -u -S adaptor.fa $string1 > filtered/log
+
+# -l N    Minimum remaining sequence length (19)
+# -q N    quality threshold causing trimming (10)
+# -w N    window-size for quality trimming (1)
+# -x N    'N' (Bad read) percentage causing trimming (20)
+# -u    enable illumina PF filtering
+# -P N    phred-scale (auto)

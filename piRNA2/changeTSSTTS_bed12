@@ -1,0 +1,71 @@
+#!/usr/bin/awk -f
+
+#usage: cat xxx.bed12 | ./changeTSSTTS_bed12 -v TSS=xxxxx -v TTS=xxxx
+# For example, change
+# chr1	5073253	5152630	NM_133826	0	+	5073253	5152630	0	14	106,147,103,90,114,105,54,98,193,179,126,102,114,445,	0,1244,5836,10190,12442,14856,17897,34217,41104,49911,52639,60577,66775,78932,
+# to
+# chr1	5073252	5152630	NM_133826	0	+	5073252	5152630	0	14	107,147,103,90,114,105,54,98,193,179,126,102,114,445,	0,1245,5837,10191,12443,14857,17898,34218,41105,49912,52640,60578,66776,78933,
+#
+
+# potential bug: if "d" is minus (the change is inwards), and |d| is larger than the size of the first exon, then blkSizes can contain '-'
+
+BEGIN{
+     OFS="\t";
+}
+{
+     chrom=$1
+     name=$4
+     score=$5
+     strand=$6
+     itemRgb=$9
+     blkCnt=$10
+     split($11,bs,",");
+     split($12,off,",");
+     blkStarts=""
+     blkSizes=""
+
+     if(TSS<0 || TTS<0){
+          print "new TSS should be >=0" > "/dev/stderr";
+          next;
+     }
+
+     if(strand=="+") {
+          if(TSS=="") TSS=$2
+          if(TTS=="") TTS=$3
+          if(TSS>($2+bs[1])) {print "new TSS will change number of exons. Ignored!" > "/dev/stderr"; next;}
+          if(TTS<($3-bs[blkCnt])) {print "new TTS will change number of exons. Ignored!" > "/dev/stderr"; next;}
+          start=TSS
+          end=TTS
+          cdsStart=(TSS>$7 || $7==$2)?TSS:$7;
+          cdsEnd=($8==$3)?TTS:$8
+          d1=$2-TSS;
+          d2=TTS-$3;
+
+          for(i=1;i<=blkCnt;i++){
+               if(i==1) bs[i]=bs[i]+d1
+               if(i==blkCnt) bs[i]=bs[i]+d2
+               blkSizes = blkSizes bs[i] ",";
+               blkStarts = blkStarts ((i==1)?0:(off[i]+d1)) ",";
+          }
+     }
+     if(strand=="-") {
+          if(TSS=="") TSS=$3
+          if(TTS=="") TTS=$2
+          if(TSS<($3-bs[blkCnt])) {print "new TSS will change number of exons. Ignored!" > "/dev/stderr"; next;}
+          if(TTS>($2+bs[1])) {print "new TTS will change number of exons. Ignored!" > "/dev/stderr"; next;}
+          start=TTS
+          end=TSS
+          cdsStart=($7==$2)?TTS:$7
+          cdsEnd=(TSS<$8 || $8==$3)?TSS:$8;
+          d1=$2-TTS;
+          d2=TSS-$3;
+
+          for(i=1;i<=blkCnt;i++){
+               if(i==1) bs[i]=bs[i]+d1
+               if(i==blkCnt) bs[i]=bs[i]+d2
+               blkSizes = blkSizes bs[i] ",";
+               blkStarts = blkStarts ((i==1)?0:(off[i]+d1)) ",";
+          }
+     }
+     print chrom, start, end, name, score, strand, cdsStart, cdsEnd, itemRgb, blkCnt, blkSizes, blkStarts;
+}

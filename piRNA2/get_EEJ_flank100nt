@@ -1,0 +1,66 @@
+################################################################
+# script for extracting FLANKING sequences of introns from the input annotation
+# Usage: get_EEJ_sequences annotation.gtf 100
+# Output: fasta sequences of EEJ with specific flanking length at each side; The sequence id is chrxxx_genomicStart
+# version: 1.0
+# date: 2013-03-04
+# Author: Xianjun Dong
+# Requirement: bedtools
+################################################################
+
+#!/bin/sh
+
+# include
+source $HOME/projects/mylib.sh
+
+annotation=$1   # bed12 format
+FLANKING=$2  # 100
+
+##############################
+# Usage: mapping_junction_reads mapped2splicing_rnaseq -q $readsfile 1 junctions2intron.pi.splicing.bed
+##############################
+
+mapping_junction_reads ()
+{
+    outputdir=$1
+    filetype=$2 # -f:fasta -q:fastq
+    readsfile=$3 # fa or fq
+    mismatch=$4
+    inputbed=$5
+    FLANKING=200; HANGOVER=2; cpu=8
+
+    # for debug
+    #outputdir=mapped2splicing_pirna; filetype="-f"; readsfile=/home/dongx/nearline/Xin/smallRNA/Phil.SRA.wt.ox.6wk.testes.raw.uniq.reads.fa.gz; mismatch=1; inputbed=junctions2intron.splicing.bed; READS_MAPPED2GENOME_SAM=mapped2genome_rnaseq_accepted_hits_R1.sam
+
+    # Phred score encoding
+    if [ "$filetype" == "-q" ];
+    then
+        phred=`getphred $readsfile`
+        [ "$phred" == "Phred+33" ] && scoreoption="--phred33";
+        [ "$phred" == "Phred+64" ] && scoreoption="--phred64";
+        [ "$phred" == "Solexa+64" ] && scoreoption="--solexa-quals";
+        echo "fastq format with score format: $scoreoption;"
+    else
+        scoreoption="";
+        echo "fasta format"
+    fi
+
+    ## left splicing region (-200,+200) around left splicing site
+    [ -d $outputdir ] || mkdir $outputdir
+    cat $inputbed | awk '{OFS="\t";split($11,a,","); split($12,b,","); A=""; B=""; for(i=1;i<length(a)-1;i++) {A=A""(b[i+1]-b[i]-a[i])",";B=B""(b[i]+a[i]-(b[1]+a[1]))",";} if($10>1) print $1,$2+a[1], $3-a[length(a)-1], "intron",$5,$6,$2+a[1], $3-a[length(a)-1],$9,$10-1,A,B;}' | bed12ToBed6 | sort -u | awk -v fk=$FLANKING '{OFS="\t"; flanking=($2>fk)?fk:$2; print $1,$2-flanking,$3+flanking,$1"_"($2-flanking)"_"($3-$2), $5,$6,$2-flanking,$3+flanking,"0,0,0",2,flanking","flanking,"0,"(flanking+$3-$2);}' | twoBitToFa -bed=stdin $GENOME/mm9/Sequence/WholeGenomeFasta/genome.2bit $outputdir/minigenome.fa
+
+    echo "...# makeing index ..."
+    bowtie2-build -q $outputdir/minigenome.fa $outputdir/minigenome
+    echo "...# mapping to junctions..."
+    export BOWTIE2_INDEXES=$outputdir
+    echo "bowtie -v $mismatch -a --best --un unmapped.fa -p $cpu $filetype -S --sam-nohead --sam-nosq genome $readsfile 2>mapping_junction_reads.log | sam2bed -v bed12=T -v sCol=NH > $readsfile.allmap.bed"
+    bowtie -v $mismatch -a --best --un $outputdir/unmapped.fa -p $cpu $filetype -S --sam-nohead --sam-nosq genome $readsfile 2>$outputdir/log | sam2bed -v bed12=T -v sCol=NH > $outputdir/allmap.bed
+
+    ## TO CHECK: strand protocal, because the minigenome is actually transcriptome
+
+    echo "...# extract all junction reads"
+    ## reads perfectly aligned to the junction
+    awk -v fk=$FLANKING -v ho=$HANGOVER -v mm=$mismatch '{if($1!~/^@/ && $6~/^[0-9]+M$/ && match($0,"NM:i:[0-"mm"]\t") && $4<=(fk-ho) && $4+length($10)>=(fk+ho)) print;}' $outputdir/allmap.bed | awk -v fk=$FLANKING '{OFS="\t"; split($1, a, "_"); print a[1], $2+a[2], a[2]+$3+a[3], $4, $5, $6, $2+a[2], a[2]+$3+a[3], "0,0,0", 2, (fk-$2)","($3-fk), "0,"(fk-$2+a[3]);}' > $readsfile.junctions.bed
+
+}
+

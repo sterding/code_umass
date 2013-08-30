@@ -1,0 +1,174 @@
+## SGE script for running PAS mapping on cluster
+# Author: Xianjun Dong
+# Date: 2012.07.20
+# Usage: qsub ~/projects/piRNA/src/PAS_pipeline.sge
+
+#!/bin/bash
+#$ -V
+#$ -pe single 8
+#$ -cwd
+#$ -o $HOME/sge_jobs_output/sge_job.$JOB_ID.out -j y
+#$ -S /bin/bash
+#$ -l mem_free=4G
+
+
+INPUTDIR=$HOME/nearline/Xin/PAS/mouse_adult_wt_PAS200_100nt
+index='mm9'
+OUTPUTDIR=$HOME/scratch/mouse_adult_wt_PAS200_100nt
+[ -d $OUTPUTDIR ] || mkdir -p $OUTPUTDIR
+ln -fs $HOME/sge_jobs_output/sge_job.$JOB_ID.out $OUTPUTDIR/sge.log
+OUTPUTfile0=$OUTPUTDIR/mouse_adult_wt_PAS200_100nt.withrearAs
+OUTPUTfile=$OUTPUTDIR/mouse_adult_wt_PAS200_100nt
+
+stat_file=$OUTPUTDIR/mapping.stat
+
+adaptorsequence='GATCGGAAGAGCGGTTCAGCAGGAATGCCGAGACCG'
+
+export BOWTIE_INDEXES=$GENOME/$index/Sequence/BowtieIndex/
+export BOWTIE2_INDEXES=$GENOME/$index/Sequence/Bowtie2Index/
+export ANNOTATION=$GENOME/$index/Annotation/Genes
+
+#==============================================
+# ---------- quality filtern ---------------
+#==============================================
+
+## 1. filter bad reads (from Illumina) and merge all individual files into one file
+#> $INPUTDIR/filtered.fastq # same as (rm file && touch file) || touch file
+#
+## for Single-end reads, we can use the ':Y:' tag to filter bad reads, but for PE data, we cannot (because the bad reads is decided if either one is bad)
+#zcat $INPUTDIR/*_R1*.fastq.gz > $INPUTDIR/filtered.fastq
+
+#echo "Total number of reads: "`wc -l $INPUTDIR/filtered.fastq | cut -f1 -d' '` > $stat_file
+
+## 2. remove adaptor
+##far -s $INPUTDIR/filtered.fastq -t $INPUTDIR/filtered.trimmed -f fastq-sanger -as $adaptorsequence --cut-off 3 --min-overlap 10  --min-readlength 30 --trim-end right --adaptive-overlap yes --nr-threads 8 --max-uncalled 70 --phred-pre-trim 10
+#flexbar -t $INPUTDIR/filtered.trimmed -f fastq-sanger -s $INPUTDIR/filtered.fastq -n 8 -as $adaptorsequence -at 3 -ao 10 --min-readlength 30 --max-uncalled 70 --phred-pre-trim 10
+
+#echo "After adaptor removal: "`wc -l $INPUTDIR/filtered.trimmed.fastq | cut -f1 -d' '` >> $stat_file
+
+# 3. for reads (a) beginning with NGG/NNG/GNG/GGG, and (b) ending with AAA{3,}[AN]*, trim the heading 3nt and tailing AAA{3,}[AN]*; if remaining length > 20nt, output
+#cat $INPUTDIR/filtered.trimmed.fastq | perl -ne '$h=$_; $s=<>; chomp($s); $id=<>; $t=<>; chomp($t); if($s=~/^[NG]{2}G/ && $s=~/A{3,}[AN]*$/) {$s=~s/(^[NG]{2}G)//; $t=substr($t, length($1)); $s=~s/(A{3,}[AN]*$)//; $t=substr($t, 0, length($t)-length($1)); if(length($s)>20) {print "$h$s\n$id$t\n";}}' > $OUTPUTfile.fastq
+# another copy with polyAs (just trim the heading [NG]{2}G and tailing N[AN]*)
+#cat $INPUTDIR/filtered.trimmed.fastq | perl -ne '$h=$_; $s=<>; chomp($s); $id=<>; $t=<>; chomp($t); if($s=~/^[NG]{2}G/ && $s=~/A{3,}[AN]*$/) {$s=~s/(^[NG]{2}G)//; $t=substr($t, length($1)); if($s=~/(A{3,}[AN]*$)/ && (length($s)-length($1))>20) {$s=~/A{3,}([AN]*$)/; $s=substr($s,0,length($s)-length($1));  $t=substr($t, 0, length($t)-length($1)); print "$h$s\n$id$t\n";}}' > $OUTPUTfile0.fastq
+
+#echo "After trimming/filtering: "`wc -l $OUTPUTfile.fastq | cut -f1 -d' '` >> $stat_file
+
+#==============================================
+# ------------- mapping
+#==============================================
+# using tophat
+# $HOME/bin/tophat-2.0.4.Linux_x86_64/tophat -o $OUTPUTDIR/tophat0 --no-convert-bam -p 8 --read-mismatches 3 --library-type fr-secondstrand --min-anchor-length 8 --min-intron-length 30 --max-intron-length 50000 --splice-mismatches 1 --max-multihits 100 --no-coverage-search genome $OUTPUTfile0.fastq
+
+# $HOME/bin/tophat-2.0.4.Linux_x86_64/tophat -o $OUTPUTDIR/tophat --no-convert-bam -p 8 --read-mismatches 2 --library-type fr-secondstrand --min-anchor-length 8 --min-intron-length 30 --max-intron-length 50000 --splice-mismatches 1 --max-multihits 100 --no-coverage-search genome $OUTPUTfile.fastq
+
+## TEMP: size selection + primary alignment
+#awk '{if($1!~/^@/ && !(and($2,0x100)) && length($10)>20) print $1}' $OUTPUTDIR/tophat0/accepted_hits.sam | sort -u > $OUTPUTfile0.mappedID
+#awk '{if($1!~/^@/ && !(and($2,0x100)) && length($10)>20) print}' $OUTPUTDIR/tophat/accepted_hits.sam > $OUTPUTDIR/tophat/accepted_hits.sam2
+#fgrep -v -f $OUTPUTfile0.mappedID $OUTPUTDIR/tophat/accepted_hits.sam2 > $OUTPUTfile.sam
+#
+#awk '{if($1!~/^@/) print $1}' $OUTPUTDIR/tophat0/accepted_hits.sam | sort -u > $OUTPUTfile0.mappedID
+#
+### ---------- exclude internal prime (reads that (reads+tailA's) can be mapped to genome)
+#fgrep -v -f $OUTPUTfile0.mappedID $OUTPUTDIR/tophat/accepted_hits.sam > $OUTPUTfile.sam
+
+#cut -f1 $OUTPUTfile.sam | sort | uniq -c > $OUTPUTfile.sam.IDsorted.temp
+#echo "Mapped reads: "`wc -l $OUTPUTfile.sam.IDsorted.temp | cut -f1 -d' '` >> $stat_file
+#echo "  among which, unique mapper and multi-mappers:" >> $stat_file
+#textHistogram -maxBinCount=2 -noStar $OUTPUTfile.sam.IDsorted.temp >> $stat_file
+#
+##==============================================
+### ---------- USCS display
+##==============================================
+
+# ------------- track for unique mapped reads
+#awk '{for(i=1;i<=NF;i++) if($i~/NH:i:1\t/ || $i~/NH:i:1$/) print}' $OUTPUTfile.sam | sam2bed -v bed12=T | awk '{OFS="\t"; if($6=="+") polyA=$3-1; if($6=="-") polyA=$2; if(polyA!="") print $1,polyA,polyA+1,$4,$5,$6;}' > $OUTPUTfile.unique.bed
+bam2bw $OUTPUTfile.unique.bed
+cp -r $OUTPUTfile.unique.*.bw ~/scratch/ucsc
+
+# ------------- track for withPolyA_genome mapped reads
+#awk '{if($1!~/^@/ && !(and($2,0x100)) && length($10)>20) print}' $OUTPUTDIR/tophat0/accepted_hits.sam | sam2bed -v bed12=T > $OUTPUTfile0.bed
+bam2bw $OUTPUTfile0.bed
+cp -r $OUTPUTfile0.*.bw ~/scratch/ucsc
+
+# ------------- track for all mapped reads
+#sam2bed -v bed12=T $OUTPUTfile.sam | awk '{OFS="\t"; if($6=="+") polyA=$3-1; if($6=="-") polyA=$2; if(polyA!="") print $1,polyA,polyA+1,$4,$5,$6;}' > $OUTPUTfile.bed
+bam2bw $OUTPUTfile.bed
+cp -r $OUTPUTfile.*.bw ~/scratch/ucsc
+
+
+# strand+bedGraph
+awk '{OFS="\t"; print $1,$2,$3,".",$4,"+";}' $OUTPUTfile.plus.bedGraph > $OUTPUTfile.peak.bed
+awk '{OFS="\t"; print $1,$2,$3,".",-$4,"-";}' $OUTPUTfile.minus.bedGraph >> $OUTPUTfile.peak.bed
+
+cp -r $OUTPUTfile.*bed $OUTPUTfile.*.bw ~/scratch/ucsc
+
+
+echo "JOB DONE";
+exit
+
+
+## ======== OLD version
+
+
+# filter out reads that
+# (a) fails filter (bad reads, e.g. contain ":Y:" in head line),
+# (b) not begin with NGG or GGG
+# (c) contain >3 N in the sequence, or
+# (d) have <2 A's at the rear
+# trim the rear A's (e.g. XXXXXXXXXAAAAAAAAA) and the beginning [NG]'s (until first non-G) off
+# remove internal priming (i.e. reads contains 6 or more consecutive A's, or the sequence with rear A's can be mapped to genome)
+
+## trim begining NGG, rear A's and remove bad reads and reads with >6 A's internally
+
+#for f in `ls $INPUTDIR/*.fastq.gz`; do ff=${f//*\//}; zcat $f | perl -ne '$h=$_; $s=<>; $id=<>; $t=<>; chomp($t); if($h=~/\:N\:/ && $s=~/^[NG]GG/ && ($s=~tr/N//)<=3 && $s=~/A+$/) {$s=~s/(A*$)//; next if(length($1)<2); $t=substr($t, 0, length($t)-length($1)); $s=~s/(^[NG]+)//; $t=substr($t, length($1),length($t)); $L=0; while($s=~/(A+)/g) {if(length($1)>=6) {$L=1; last;}}; print "$h$s$id$t\n" if($L==0);}' >> $OUTPUT.fastq; done
+#
+##
+### including rear A's, to see if these reads can be mapped to genome (if yes, then it's internal prime)
+#> $OUTPUT0.fastq;  # same as (rm file && touch file) || touch file
+#for f in `ls $INPUTDIR/*.fastq.gz`; do ff=${f//*\//}; zcat $f | perl -ne '$h=$_; $s=<>; $id=<>; $t=<>; chomp($t); if($h=~/\:N\:/ && $s=~/^[NG]GG/ && ($s=~tr/N//)<=3 && $s=~/A+$/) {$s=~s/(^[NG]+)//; $t=substr($t, length($1),length($t)); $ss=$s; $s=~s/(A*$)//; next if(length($1)<2); $L=0; while($s=~/(A+)/g) {if(length($1)>=6) {$L=1; last;}}; print "$h$ss$id$t\n" if($L==0);}' >> $OUTPUT0.fastq; done
+
+## ---------- mapping
+## -m 1 will guarantee reporting the unique mapped reads (only 1 alignment given the rest options)
+## if allowing multiple mapping and only report the best alignments, use --best --strata,
+## So, the following option will output the best group of alignments which have <=3 mismatch and total hit number is <=3. This will repress the good alignments but mapped in repeat regions.
+#bowtie genome -v 3 -a -M 5 --best --strata -p 8 --quiet $OUTPUT.fastq > $OUTPUT.bowtieOut0
+#bowtie genome -v 3 -a -M 5 --best --strata -p 8 --quiet $OUTPUT0.fastq | cut -f1 -d' ' | sort -u > $OUTPUT0.bowtieOut_internalPrime_ID
+
+# allowing multiple hits (the first 100 best hits)
+bowtie genome_offrate3 -v 3 -k 100 --best -p 8 --quiet $OUTPUT.fastq > $OUTPUT.bowtieOut0
+bowtie genome_offrate3 -v 3 -k 100 --best -p 8 --quiet $OUTPUT0.fastq | cut -f1 -d' ' | sort -u > $OUTPUT0.bowtieOut_internalPrime_ID
+
+#
+## ---------- exclude internal prime (reads that (reads+tailA's) can be mapped to genome)
+fgrep -v -f $OUTPUT0.bowtieOut_internalPrime_ID $OUTPUT.bowtieOut0 > $OUTPUT.bowtieOut
+## then, bowtieOut does not include internal prime
+#
+
+## ---------- USCS display
+
+## convert to BED
+perl bowtie2bed.pl $OUTPUT.bowtieOut - | awk '{OFS="\t"; if($6=="+") polyA=$3-1; if($6=="-") polyA=$2; if(polyA!="") print $1,polyA,polyA+1,$4,$5,$6;}' > $OUTPUT.bed
+#
+## bigwig
+awk '{if($6=="+") print}' $OUTPUT.bed | sort -k1,1 | bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n > $OUTPUT.plus.bedGraph
+awk '{if($6=="-") print}' $OUTPUT.bed | sort -k1,1 | bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n | awk '{OFS="\t"; print $1,$2,$3,"-"$4}' > $OUTPUT.minus.bedGraph
+bedGraphToBigWig $OUTPUT.plus.bedGraph $ANNOTATION/ChromInfo.txt $OUTPUT.plus.bw
+bedGraphToBigWig $OUTPUT.minus.bedGraph $ANNOTATION/ChromInfo.txt $OUTPUT.minus.bw
+
+
+# BEDGraph
+echo "track type=bedGraph name=$OUTPUT description=$OUTPUT visibility=full" > $OUTPUT.bedGraph
+sort -k1,1 $OUTPUT.bed | bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n >> $OUTPUT.bedGraph
+
+# strand+bedGraph
+awk '{OFS="\t"; print $1,$2,$3,".",$4,"+";}' $OUTPUT.plus.bedGraph > $OUTPUT.peak.bed
+awk '{OFS="\t"; print $1,$2,$3,".",-$4,"-";}' $OUTPUT.minus.bedGraph >> $OUTPUT.peak.bed
+
+cp -r $OUTPUT.*bed $OUTPUT.bedGraph $OUTPUT.*.bw $OUTPUT.*fastqc ~/scratch/ucsc
+
+
+echo "JOB DONE";
+
+#after the job done
+# scp *.bw *.bed *.polyAonly.bedGraph PAS_pipeline.sge zlab:~/public_html/tracks/PAS
+# mv PAS200.merged.filtered.polyAonly.* ../result/PAS

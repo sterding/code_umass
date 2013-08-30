@@ -1,0 +1,18 @@
+#!/usr/bin/perl
+# fastq to fa, with same sequence collapsed together
+open IN, $ARGV[0];
+$i=0;
+while(<IN>) {
+    $i++;
+    next if($i%4!=2);
+    chomp; $seq=$_;
+    $hash{$seq}++ if(length($seq)>=$ARGV[1] && length($seq)<=$ARGV[2]);
+}
+$i=0;
+$N=length(scalar keys %hash);
+foreach (keys %hash)
+{
+    $i++;
+    $id=sprintf "%0${N}d", $i;
+    print ">s${id}_$hash{$_}\n$_\n";
+}

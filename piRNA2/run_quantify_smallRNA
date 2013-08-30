@@ -1,0 +1,49 @@
+################################################################
+# script for quantifying the input annotation (tx, genes, or ncRNA) using input alignment
+# Usage: run_quanfiy_RNAseq annotation.gtf mapping.bed [CDS|3UTR|5UTR|exon|intron|promoter|gene]
+# Output: raw and normalized reads count, and ppm and rpkm of smallRNA reads in the specific region for each annotation
+# version: 1.0
+# date: 2013-03-04
+# Author: Xianjun Dong
+# Requirement: bedtools
+################################################################
+
+#!/bin/sh
+source $HOME/projects/mylib.sh
+
+annotation=$1  # gtf format
+mapping=$2  #bed for smallRNA
+regionType=$3  # one of [CDS|3UTR|5UTR|exon|intron|promoter|transcript]
+
+[ "$mapping" == "" ] && die "Usage: run_quanfiy_RNAseq annotation.gtf mapping.bed [CDS|3UTR|5UTR|exon|intron|transcript]";
+
+# convert gtf to bed for corresponding region
+annotation2bed="$(mktemp)"
+case "$regionType" in
+    3UTR)
+        # 3« UTR (if any) of gene annotation in BED12 format
+        gtf2bed $annotation | awk '{OFS="\t";split($11,a,","); split($12,b,","); A=""; B=""; if($7==$8) next; if($6=="-" && $8<$3) {for(i=1;i<length(a);i++) if(($2+b[i]+a[i])<=$7) {A=A""a[i]",";B=B""b[i]",";} else {A=A""($7-$2-b[i])",";B=B""b[i]","; break; } print $1,$2,$7,$4,$5,$6,$2,$7,$9,i,A,B;} if($6=="+" && $2<$7) {for(i=length(a)-1;i>0;i--) if(($2+b[i])>=$8) {A=a[i]","A;B=($2+b[i]-$8)","B;} else {A=($2+b[i]+a[i]-$8)","A;B=0","B; break; } print $1,$8,$3,$4,$5,$6,$8,$3,$9,length(a)-i,A,B;}}' | bedtools bed12tobed6 | sort -k1,1 -k2,2n > $annotation2bed
+        ;;
+    5UTR)
+        # 5« UTR (if any) of gene annotation in BED12 format
+        gtf2bed $annotation | awk '{OFS="\t";split($11,a,","); split($12,b,","); A=""; B="";  if($7==$8) next; if($6=="+" && $2<$7) {for(i=1;i<length(a);i++) if(($2+b[i]+a[i])<=$7) {A=A""a[i]",";B=B""b[i]",";} else {A=A""($7-$2-b[i])",";B=B""b[i]","; break; } print $1,$2,$7,$4,$5,$6,$2,$7,$9,i,A,B;} if($6=="-" && $8<$3) {for(i=length(a)-1;i>0;i--) if(($2+b[i])>=$8) {A=a[i]","A;B=($2+b[i]-$8)","B;} else {A=($2+b[i]+a[i]-$8)","A;B=0","B; break; } print $1,$8,$3,$4,$5,$6,$8,$3,$9,length(a)-i,A,B;}}' | bedtools bed12tobed6 | sort -k1,1 -k2,2n > $annotation2bed
+        ;;
+    intron)
+        # Introns (if any) of gene annotation in BED12 format
+        gtf2bed $annotation | awk '{OFS="\t";split($11,a,","); split($12,b,","); A=""; B=""; for(i=1;i<length(a)-1;i++) {A=A""(b[i+1]-b[i]-a[i])",";B=B""(b[i]+a[i]-(b[1]+a[1]))",";} if($10>1) print $1,$2+a[1], $3-a[length(a)-1], $4,$5,$6,$2+a[1], $3-a[length(a)-1],$9,$10-1,A,B;}' | bedtools bed12tobed6 | sort -k1,1 -k2,2n > $annotation2bed
+        ;;
+    CDS)
+        # CDS (if any) of gene annotation in BED12 format
+        gtf2bed $annotation | awk '{OFS="\t";split($11,a,","); split($12,b,","); A=""; B=""; if($7==$8) next; j=0; for(i=1;i<length(a);i++) if(($2+b[i]+a[i])>$7 && ($2+b[i])<$8) {j++; start=$2+b[i]-$7; size=a[i]; if(($2+b[i])<=$7) {start=0;size=size-($7-($2+b[i]));} if(($2+a[i]+b[i])>=$8) {size=size-($2+a[i]+b[i]-$8);} A=A""size",";B=B""start",";} print $1,$7,$8,$4,$5,$6,$7,$8,$9,j,A,B;}' | bedtools bed12tobed6 | sort -k1,1 -k2,2n > $annotation2bed
+        ;;
+    *)
+        # exons or transcript of genes
+        gtf2bed $annotation | bedtools bed12tobed6 | sort -k1,1 -k2,2n > $annotation2bed
+        ;;
+esac
+
+ncol=`head -n1 $mapping | awk '{print NF}'`
+let ncol=ncol+4
+total_piRNA_reads=`cut -f4 $mapping | cut -f2 -d"_" | addCols stdin`
+# intersect and calculate ppm/rpkm for each transcript
+intersectBed -a $mapping -b $annotation2bed -s -wo -sorted -split | awk -v nid=$ncol -v sum=$total_piRNA_reads '{OFS="\t"; split($4,a,"_"); n_start=nid-2; n_end=nid-1; s0[$nid]=s0[$nid]+a[2]; s[$nid]=s[$nid]+(a[2]/$5); l[$nid]=l[$nid]+($n_end-$n_start); }END{for(i in s) print i, s0[i], s[i], s[i]*1e6/sum, s[i]*1e9/(l[i]*sum);}' > $annotation.ppm.rpkm

@@ -1,0 +1,38 @@
+################################################################
+# script for quantifying the input annotation (tx, genes, or ncRNA) using input alignment
+# Usage: run_quanfiy_RNAseq annotation.gtf mapping.bam [CDS|3UTR|5UTR|exon|intron|promoter|gene]
+# Output: reads raw and normalized count in the specific region for each annotation
+# version: 1.0
+# date: 2013-03-04
+# Author: Xianjun Dong
+# Requirement: bedtools
+################################################################
+
+#!/bin/sh
+annotation=$1
+mapping=$2
+regionType=$3  # one of [CDS|3UTR|5UTR|exon|intron|promoter|transcript]
+
+annotation2bed="$(mktemp)"
+cut -f1-2 -d';' $annotation | sed 's/"//g;s/gene_id//g;s/transcript_id//g;s/ //g;s/;/\t/g;'| awk -v type=$regionType 'BEGIN{OFS="\t"}{split($9,a,";");if($3==type) print $1,$4-1,$5,$9,$10,$7}' > $annotation2bed
+
+
+
+# ============  quantification using flux
+echo "
+COVERAGE_FILE   flux.coverage.out
+INSERT_FILE flux.insert.out
+PROFILE_FILE    flux.profile.out
+STATS_FILE flux.stats.out
+STDERR_FILE flux.error.log
+TMP_DIR /tmp/
+KEEP_SORTED /tmp/
+SORT_IN_RAM TRUE
+COVERAGE_STATS TRUE
+" > flux.parameters
+# see details: http://sammeth.net/confluence/display/FLUX/Parameters++-+PAR+format
+flux-capacitor -p flux.parameters -a $annotation -i $mapping -o flux.gtf -r --threads 8 -d PAIRED -m PAIRED --force
+
+
+
+

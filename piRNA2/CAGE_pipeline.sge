@@ -1,0 +1,176 @@
+## SGE script for running CAGE mapping on cluster
+# also works for mouse_adult_wt_Degradome.polyA_100nt_strand data
+# Author: Xianjun Dong
+# Date: 2012.04.9
+# Usage: qsub ~/projects/piRNA/src/CAGE_pipeline.sge $HOME/nearline/Xin/CAGE/mouse_adult_wt_CAGE_PE100nt_strand mouse_adult_wt_CAGE_PE100nt_strand
+# qsub CAGE_pipeline.sge /home/dongx/nearline/Xin/others/mouse_adult_wt_Degradome.polyA_100nt_strand mouse_adult_wt_Degradome.polyA_100nt_strand
+# qsub CAGE_pipeline.sge /home/dongx/nearline/Xin/others/mouse_adult_wt_Degradome.polyA-_100nt_strand mouse_adult_wt_Degradome.polyA-_100nt_strand
+# qsub CAGE_pipeline.sge $HOME/nearline/Xin/CAGE/mouse_10dpp_wt_CAGE_100nt_strand mouse_10dpp_wt_CAGE_100nt_strand
+# qsub CAGE_pipeline.sge $HOME/nearline/Xin/CAGE/mouse_10dpp_wt_CAGE_50nt_strand_BGI101012 mouse_10dpp_wt_CAGE_50nt_strand_BGI101012
+# qsub CAGE_pipeline.sge $HOME/nearline/Xin/CAGE/mouse_adult_wt_CAGE.PolyA-_50nt_strand_BGI101012 mouse_adult_wt_CAGE.PolyA-_50nt_strand_BGI101012
+# qsub CAGE_pipeline.sge $HOME/nearline/Xin/CAGE/mouse_adult_wt_CAGE.PolyA+_50nt_strand_BGI101012 mouse_adult_wt_CAGE.PolyA+_50nt_strand_BGI101012
+
+#!/bin/bash
+#$ -V
+#$ -pe single 8
+#$ -cwd
+#$ -o $HOME/sge_jobs_output/sge_job.$JOB_ID.out -j y
+#$ -S /bin/bash
+#$ -l mem_free=4G
+
+INPUTDIR=$1
+index='mm9'
+OUTPUTDIR="$HOME/scratch/$2"  #"mouse_adult_wt_CAGE_PE100nt_strand"
+[ -d $OUTPUTDIR ] || mkdir -p $OUTPUTDIR
+ln -fs $HOME/sge_jobs_output/sge_job.$JOB_ID.out $OUTPUTDIR/sge.log
+OUTPUTfile=$OUTPUTDIR/$2
+adaptorsequence='AGATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG'
+
+stat_file=$OUTPUTDIR/mapping.stat
+
+export BOWTIE_INDEXES=$GENOME/$index/Sequence/BowtieIndex/
+export BOWTIE2_INDEXES=$GENOME/$index/Sequence/Bowtie2Index/
+export ANNOTATION=$GENOME/$index/Annotation/Genes
+
+#==============================================
+# ---------- quality filtern ---------------
+#==============================================
+
+# 1. filter bad reads (from Illumina) and merge all individual files into one file
+# only merge R1 (Note: for PE reads, we cannot use the ':Y:' tag to filter bad reads, because the bad reads is decided if either one is bad)
+#zcat $INPUTDIR/*_R1*.fastq.gz > $INPUTDIR/filtered.fastq
+
+phred=`getphred $INPUTDIR/filtered.fastq`; tophat_scoreoption=""; # default
+[ "$phred" == "Phred+64" ] && tophat_scoreoption="--solexa1.3-quals";
+[ "$phred" == "Solexa+64" ] && tophat_scoreoption="--solexa-quals";
+echo "tophat_scoreoption: $tophat_scoreoption"
+
+echo "Total number of reads: "`wc -l $INPUTDIR/filtered.fastq | awk '{printf("%'\''d",$1);}'` > $stat_file
+# 2. remove adaptor
+#flexbar -t $INPUTDIR/filtered.trimmed -f fastq-sanger -s $INPUTDIR/filtered.fastq -n 8 -as $adaptorsequence -at 3 -ao 10 --min-readlength 20 --max-uncalled 70 --phred-pre-trim 10
+
+#echo "After adaptor removal: "`wc -l $INPUTDIR/filtered.trimmed.fastq |  awk '{printf("%'\''d",$1);}'` >> $stat_file
+
+# 3. for reads beginning with NG/GG, trim the heading 2nt; if the remain length >20nt, then output
+#cat $INPUTDIR/filtered.trimmed.fastq | perl -ne '$h=$_; $s=<>; chomp($s); $id=<>; $t=<>; chomp($t); if($s=~/^[NG]G/) {$s=~s/(^[NG]G)//; $t=substr($t, length($1)); if(length($s)>20) {print "$h$s\n$id$t\n";}}' > $OUTPUTfile.fastq
+cat $INPUTDIR/filtered.fastq | perl -ne '$h=$_; $s=<>; chomp($s); $id=<>; $t=<>; chomp($t); if($s=~/^[NG]G/) {$s=~s/(^[NG]G)//; $t=substr($t, length($1)); if(length($s)>20) {print "$h$s\n$id$t\n";}}' > $OUTPUTfile.fastq
+
+echo "After trimming/filtering: "`wc -l $OUTPUTfile.fastq |  awk '{printf("%'\''d",$1);}'` >> $stat_file
+#==============================================
+# ------------- mapping
+#==============================================
+# using tophat
+$HOME/bin/tophat-2.0.4.Linux_x86_64/tophat -o $OUTPUTDIR $tophat_scoreoption --no-convert-bam -p 8 --read-mismatches 2 --library-type fr-secondstrand --min-anchor-length 8 --min-intron-length 30 --max-intron-length 50000 --splice-mismatches 1 --max-multihits 100 --no-coverage-search genome $OUTPUTfile.fastq
+
+mv $OUTPUTDIR/accepted_hits.sam $OUTPUTfile.sam
+
+cut -f1 $OUTPUTfile.sam | sort | uniq -c > $OUTPUTfile.sam.IDsorted.temp
+echo "Mapped reads: "`wc -l $OUTPUTfile.sam.IDsorted.temp |  awk '{printf("%'\''d",$1);}'` >> $stat_file
+echo "  among which, unique mapper and multi-mappers:" >> $stat_file
+textHistogram -maxBinCount=2 -noStar $OUTPUTfile.sam.IDsorted.temp >> $stat_file
+
+#==============================================
+## ---------- USCS display
+#==============================================
+
+# ------------- track for unique mapped reads
+awk '{for(i=1;i<=NF;i++) if($i~/NH:i:1\t/ || $i~/NH:i:1$/) print}' $OUTPUTfile.sam | sam2bed -v bed12=T | awk '{OFS="\t";if($6=="+") TSS=$2;  if($6=="-") TSS=$3-1;  if(TSS!="") print $1,TSS,TSS+1,$4,$5,$6;}' > $OUTPUTfile.unique.bed
+bam2bw $OUTPUTfile.unique.bed
+cp -r $OUTPUTfile.unique.*.bw ~/scratch/ucsc
+# strand+bedGraph (used for mergeAnnotation.sh)
+awk '{OFS="\t"; print $1,$2,$3,".",$4,"+";}' $OUTPUTfile.unique.plus.bedGraph > $OUTPUTfile.unique.peak.bed
+awk '{OFS="\t"; print $1,$2,$3,".",-$4,"-";}' $OUTPUTfile.unique.minus.bedGraph >> $OUTPUTfile.unique.peak.bed
+
+# ------------- track for all mapped reads
+sam2bed -v bed12=T $OUTPUTfile.sam | awk '{OFS="\t";if($6=="+") TSS=$2;  if($6=="-") TSS=$3-1;  if(TSS!="") print $1,TSS,TSS+1,$4,$5,$6;}' > $OUTPUTfile.bed
+bam2bw $OUTPUTfile.bed
+cp -r $OUTPUTfile*.bw ~/scratch/ucsc
+# strand+bedGraph (used for mergeAnnotation.sh)
+awk '{OFS="\t"; print $1,$2,$3,".",$4,"+";}' $OUTPUTfile.plus.bedGraph > $OUTPUTfile.peak.bed
+awk '{OFS="\t"; print $1,$2,$3,".",-$4,"-";}' $OUTPUTfile.minus.bedGraph >> $OUTPUTfile.peak.bed
+
+## clustering CTSS to get TC regions (in narrowPeak format), using IQR (0.1-0.9 range) as width
+#D=20
+#cat $OUTPUTfile.unique.plus.bedGraph  | awk '{OFS="\t"; print $1,$2,$3,$1":"$2"-"$3, $4 }' | mergeBed -d $D -scores collapse -nms | awk '{OFS="\t"; split($4,a,";");split($5,b,","); max=0; for(i=1;i<=length(b);i++) {if(b[i]>max) {max=b[i]; ii=1; delete imax; imax[ii++]=a[i];} else if(b[i]==max) {imax[ii++]=a[i];}} for(j=1;j<ii;j++) {split(imax[j], c, ":|-"); print $1,$2,$3,"TC_p"NR,max,"+",max,-1,-1,c[2]-$2;}}' > $OUTPUTfile.unique.narrowPeak
+#cat $OUTPUTfile.unique.minus.bedGraph | awk '{OFS="\t"; print $1,$2,$3,$1":"$2"-"$3, $4 }' | mergeBed -d $D -scores collapse -nms | awk '{OFS="\t"; split($4,a,";");split($5,b,","); max=0; for(i=1;i<=length(b);i++) {if(b[i]<max) {max=b[i]; ii=1; delete imax; imax[ii++]=a[i];} else if(b[i]==max) {imax[ii++]=a[i];}} for(j=1;j<ii;j++) {split(imax[j], c, ":|-"); print $1,$2,$3,"TC_m"NR,-max,"-",-max,-1,-1,c[2]-$2;}}' >> $OUTPUTfile.unique.narrowPeak
+#
+#cp -r $OUTPUTfile*.narrowPeak ~/scratch/ucsc
+
+
+echo "JOB DONE"; exit;
+
+
+### OLD VERSION
+
+# ---------- quality filtern (only polyA+ ones kept)
+
+# filter out reads that
+# (a) fails filter (bad reads, e.g. contain ":Y:" in head line),
+# (b) not begin with NG or GG
+# trim the beginning [NG] (until first non-G) off
+
+> $OUTPUT.fastq;  # same as (rm file && touch file) || touch file
+
+## trim begining [NG]{2}, and remove bad reads
+#for f in `ls $INPUTDIR/*.fastq.gz`; do ff=${f//*\//}; zcat $f | perl -ne '$h=$_; $s=<>; $id=<>; $t=<>; chomp($t); if($h=~/\:N\:/ && $s=~/^[NG]G/) {$s=~s/(^[NG]+)//; $t=substr($t, length($1),length($t)); print "$h$s$id$t\n";}' >> $OUTPUT.fastq; done
+## remove the heading 2nt directly (no matter what it is)
+#for f in `ls $INPUTDIR/*.fastq.gz`; do ff=${f//*\//}; zcat $f | perl -ne '$h=$_; $s=<>; $id=<>; $t=<>; chomp($t); if($h=~/\:N\:/) {$s=substr($s,3); $t=substr($t,3); print "$h$s$id$t\n";}' >> $OUTPUT.fastq; done
+## trim begining NGG, remove bad reads and extract the first 50nt
+#for f in `ls $INPUTDIR/*.fastq.gz`; do ff=${f//*\//}; zcat $f | perl -ne '$h=$_; $s=<>; $id=<>; $t=<>; chomp($t); if($h=~/\:N\:/ && $s=~/^[NG]G/) {$s=~s/(^[NG]+)//; $s=substr($s, 0, 50); $t=substr($t, length($1),length($1)+50); print "$h$s$id$t\n";}' >> $OUTPUT.fastq; done
+
+
+## QC
+fastqc --outdir $HOME/scratch/$2 $(echo $OUTPUT.fastq | sed 's/,/ /g')
+rm $HOME/scratch/$2/*fastqc.zip
+
+##TODO: remove the low-quality end
+#far -s $OUTPUT.fastq -t $r eadsfile.clipped -f $far -as $adaptorsequence --cut-off 5 --min-overlap 10  --min-readlength 20 --trim-end $trimend --adaptive-overlap yes --nr-threads 8 --max-uncalled 30
+
+## ---------- mapping
+## -m 1 will guarantee reporting the unique mapped reads (only 1 alignment given the rest options)
+## if allowing multiple mapping and only report the best alignments, use --best --strata,
+## So, the following option will output the best group of alignments which have <=3 mismatch and total hit number is <=3. This will repress the good alignments but mapped in repeat regions.
+bowtie genome -v 3 -a -m 5 --best --strata -p 8 --quiet $OUTPUT.fastq > $OUTPUT.bowtieOut
+
+## ---------- USCS display
+
+## convert to BED
+## only take the most 5'end nt
+perl bowtie2bed.pl $OUTPUT.bowtieOut - | awk '{OFS="\t";if($6=="+") TSS=$2;  if($6=="-") TSS=$3-1;  if(TSS!="") print $1,TSS,TSS+1,$4,$5,$6;}' > $OUTPUT.bed
+##  use the full lenght of reads, might be useful for peak calling
+#perl bowtie2bed.pl $OUTPUT.bowtieOut $OUTPUT.bed
+## take first 10nt [TSS, TSS+10], might be also useful for peak calling
+#perl bowtie2bed.pl $OUTPUT.bowtieOut - | awk '{OFS="\t";if($6=="+") TSS=$2;  if($6=="-") TSS=$3-10;  if(TSS!="") print $1,TSS,TSS+10,$4,$5,$6;}' > $OUTPUT.bed
+
+## bigwig
+## Wei's suggestion: running once to split the strand info
+sort -k1,1 $OUTPUT.bed | awk -v OUTPUT=$OUTPUT '{print $0 >> OUTPUT".bed"$6}'
+bedItemOverlapCount $index -chromSize=$ANNOTATION/ChromInfo.txt $OUTPUT.bed+ | sort -k1,1 -k2,2n > $OUTPUT.plus.bedGraph
+bedItemOverlapCount $index -chromSize=$ANNOTATION/ChromInfo.txt $OUTPUT.bed- | sort -k1,1 -k2,2n | awk '{OFS="\t"; print $1,$2,$3,"-"$4}' > $OUTPUT.minus.bedGraph
+
+# instead of running the seperating twice
+#awk '{if($6=="+") print}' $OUTPUT.bed | sort -k1,1 | bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n > $OUTPUT.plus.bedGraph
+#awk '{if($6=="-") print}' $OUTPUT.bed | sort -k1,1 | bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n | awk '{OFS="\t"; print $1,$2,$3,"-"$4}' > $OUTPUT.minus.bedGraph
+
+bedGraphToBigWig $OUTPUT.plus.bedGraph $ANNOTATION/ChromInfo.txt $OUTPUT.plus.bw
+bedGraphToBigWig $OUTPUT.minus.bedGraph $ANNOTATION/ChromInfo.txt $OUTPUT.minus.bw
+
+
+# BEDGraph
+echo "track type=bedGraph name='$2' description='$2' visibility=full" > $OUTPUT.bedGraph
+sort -k1,1 $OUTPUT.bed| bedItemOverlapCount mm9 -chromSize=$ANNOTATION/ChromInfo.txt stdin | sort -k1,1 -k2,2n >> $OUTPUT.bedGraph
+
+# strand+bedGraph
+awk '{OFS="\t"; print $1,$2,$3,".",$4,"+";}' $OUTPUT.plus.bedGraph > $OUTPUT.peak.bed
+awk '{OFS="\t"; print $1,$2,$3,".",-$4,"-";}' $OUTPUT.minus.bedGraph >> $OUTPUT.peak.bed
+
+cp -r $OUTPUT.*bed $OUTPUT.bedGraph $OUTPUT.*.bw $OUTPUT.*fastqc ~/scratch/ucsc
+
+# peak detection
+#macs14 -t  $OUTPUT.bed -f BED -g mm -n PAS -B --nolambda
+
+echo "JOB DONE";
+
+#after the job done
+# scp *.bw *.bed *.polyAonly.bedGraph PAS_pipeline.sge zlab:~/public_html/tracks/PAS
+# mv PAS200.merged.filtered.polyAonly.* ../result/PAS

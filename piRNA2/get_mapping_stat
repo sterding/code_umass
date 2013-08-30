@@ -1,0 +1,130 @@
+################################################################
+# script for mapping stat of input alignment
+# Usage: get_mapping_stat mapping.bed smallRNA
+# Output: mapping.stat of input file
+# version: 1.0
+# date: 2013-03-04
+# Author: Xianjun Dong
+# Requirement: bedtools
+################################################################
+
+#!/bin/sh
+
+# include
+source $HOME/projects/mylib.sh
+
+mapping=$1   # sam bam or bed
+dataType=$2  # one of smallRNA|RNAseq|CAGE|PAS|ChIPseq
+
+export ANNOTATION=$GENOME/mm9/Annotation
+ncRNA=$ANNOTATION/ncRNA/ncRNA.wt_miRNA_piRNA.bed12  # ncRNA from fRNAdb (http://www.ncrna.org/frnadb/download)
+miRNA=$ANNOTATION/SmallRNA/mm10.liftover.to.mm9.bed  # precursor from miRBase
+exons=$ANNOTATION/Genes/genes.exons.bed12  # mRNA
+cds=$ANNOTATION/Genes/genes.cds.bed12  # mRNA
+introns=$ANNOTATION/Genes/genes.introns.bed12
+three_prime_utr=$ANNOTATION/Genes/genes.3utr.bed12
+five_prime_utr=$ANNOTATION/Genes/genes.5utr.bed12
+
+case "$dataType" in
+    smallRNA)
+        [[ "${mapping##*.}" == "bed|bed12" ]] || die "SAM format required!";
+        # require the mapping in bed format, and the name (sxxx_XXX) field contains number of reads for that species, the score filed indicates number of times the reads mapped
+        #Reads mapping	ncRNA reads	miRNA matching reads	24Ð40 nt small RNA reads(Total piRNA, Splice junction mapping)		Calculated Normalization Factor
+        readsMapped=`grep -v "^#" $mapping | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        readsMapped_u=`grep -v "^#" $mapping | awk '{if($5==1) print}'| cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        readsMapped_m=`grep -v "^#" $mapping | awk '{if($5>1) print}' | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        reads2ncRNA=`intersectBed -a $mapping -b $ncRNA -u -s | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        reads2miRNA=`intersectBed -a $mapping -b $miRNA -u -s | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        reads2smallRNA24_40nt=`intersectBed -a $mapping -b $ncRNA -v -s | intersectBed -a stdin -b $miRNA -v -s | cut -f4,10,11 | uniq | awk 'BEGIN{totalpiRNA=0;juncpiRNA=0;OFS="\t";}{split($1,a,"_"); split($3,sizes,","); sum=0; for (i in sizes) sum += sizes[i]; if(sum>=24 && sum<=40) {totalpiRNA+=a[2]; if($2>1) juncpiRNA+=a[2];}}END{print totalpiRNA,juncpiRNA;}'`
+
+        # output
+        echo -e "type\ttotalMapping\ttotalMapping_u\ttotalMapping_m\tmapped2ncRNA\tmapped2miRNA\tmapped2smallRNA24_40nt\tmapped2smallRNA24_40nt_junction" > ${mapping/.*/.stat}
+        echo -e "reads\t$readsMapped\t$readsMapped_u\t$readsMapped_m\t$reads2ncRNA\t$reads2miRNA\treads2smallRNA24_40nt" | sed 's/ /\t/g'>> ${mapping/.*/.stat}
+
+        #Species mapping	ncRNA species	species excluding ncRNA	miRNA matching species	species excluding ncRNA & miRNA, 	24Ð40 nt small RNA species(Total piRNA	Splice junction mapping)
+        speciesMapped=`grep -v "^#" $mapping | cut -f4 | uniq | wc -l`
+        speciesMapped_u=`grep -v "^#" $mapping | awk '{if($5==1) print}' | cut -f4 | uniq | wc -l`
+        speciesMapped_m=`grep -v "^#" $mapping | awk '{if($5>1) print}' | cut -f4 | uniq | wc -l`
+        species2ncRNA=`intersectBed -a $mapping -b $ncRNA -u -s | wc -l`
+        species2miRNA=`intersectBed -a $mapping -b $miRNA -u -s | wc -l`
+        species2smallRNA24_40nt=`intersectBed -a $mapping -b $ncRNA -v -s | intersectBed -a stdin -b $miRNA -v -s | cut -f4,10,11 | uniq | awk 'BEGIN{totalpiRNA=0;juncpiRNA=0;OFS="\t";}{split($3,sizes,","); sum=0; for (i in sizes) sum += sizes[i]; if(sum>=24 && sum<=40) {totalpiRNA++; if($2>1) juncpiRNA++;}}END{print totalpiRNA,juncpiRNA;}'`
+
+        echo -e "species\t$speciesMapped\t$speciesMapped_u\t$speciesMapped_m\t$species2ncRNA\t$species2miRNA\tspecies2smallRNA24_40nt" | sed 's/ /\t/g'>> ${mapping/.*/.stat}
+        ;;
+
+    RNAseq|RNA-seq)
+        [[ "${mapping##*.}" == "sam" ]] || die "SAM format required!";
+        # require the mapping in sam format
+        # output filed: Unquiely mapping reads, Multiple mapping reads, reads mapped to piRNA locus, 5? UTR, All exons, Intron, 3? UTR, miRNA
+        read1Mapped=`samtools view -S -f 65 -c $mapping`  #read paired & first in pair
+        read1Mapped_u=`samtools view -S -f 65 $mapping | fgrep -cw NH:i:1`
+        read1Mapped_m=`samtools view -S -f 65 $mapping | fgrep -cvw NH:i:1`
+        read1piRNA=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $piRNA | wc -l`
+        read15UTR=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $five_prime_utr | wc -l`
+        read1exon=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $exon | wc -l`
+        read1intron=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $introns | wc -l`
+        read13UTR=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $three_prime_utr | wc -l`
+        read1miRNA=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $miRNA | wc -l`
+
+        # output
+        echo -e "type\ttotalMapping\ttotalMapping_u\ttotalMapping_m\tmapped2piRNA\tmapped25UTR\tmapped2exons\tmapped2introns\tmapped23UTR\tmapped2miRNA" > ${mapping/.*/.stat}
+        echo -e "R1_reads\t$read1Mapped\t$read1Mapped_u\t$read1Mapped_m\t$read1piRNA\t$read15UTR\t$read1exon\t$read1intron\t$read13UTR\t$read1miRNA" >> ${mapping/.*/.stat}
+
+        read2Mapped=`samtools view -S -f 129 -c $mapping`  #read paired & first in pair
+        read2Mapped_u=`samtools view -S -f 129 $mapping | fgrep -cw NH:i:1`
+        read2Mapped_m=`samtools view -S -f 129 $mapping | fgrep -cvw NH:i:1`
+        read2piRNA=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $piRNA | wc -l`
+        read25UTR=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $five_prime_utr | wc -l`
+        read2exon=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $exon | wc -l`
+        read2intron=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $introns | wc -l`
+        read23UTR=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $three_prime_utr | wc -l`
+        read2miRNA=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $miRNA | wc -l`
+
+        echo -e "R2_reads\t$read2Mapped\t$read2Mapped_u\t$read2Mapped_m\t$read2piRNA\t$read25UTR\t$read2exon\t$read2intron\t$read23UTR\t$read2miRNA" >> ${mapping/.*/.stat}
+
+        # stat for species
+        species1Mapped=`samtools view -S -f 65 $mapping | awk '{r[$10]++;}END{for(i in r)j++; print j;}'`
+        species1Mapped_u=`samtools view -S -f 65 $mapping | fgrep -w NH:i:1 | awk '{r[$10]++;}END{for(i in r)j++; print j;}'`
+        species1Mapped_m=0
+        species1piRNA=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $piRNA | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species15UTR=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $five_prime_utr | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species1exon=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $exon | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species1intron=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $introns | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species13UTR=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $three_prime_utr | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species1miRNA=`samtools view -S -f 65 -bu $mapping | intersectBed -abam -u -s -a stdin -b $miRNA | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+
+        echo -e "R1_species\t$species1Mapped\t$species1Mapped_u\t$species1Mapped_m\t$species1piRNA\t$species15UTR\t$species1exon\t$species1intron\t$species13UTR\t$species1miRNA" >> ${mapping/.*/.stat}
+
+        species2Mapped=`samtools view -S -f 129 $mapping | awk '{r[$10]++;}END{for(i in r)j++; print j;}'`
+        species2Mapped_u=`samtools view -S -f 129 $mapping | fgrep -w NH:i:1 | awk '{r[$10]++;}END{for(i in r)j++; print j;}'`
+        species2Mapped_m=0
+        species2piRNA=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $piRNA | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species25UTR=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $five_prime_utr | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species2exon=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $exon | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species2intron=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $introns | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species23UTR=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $three_prime_utr | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+        species2miRNA=`samtools view -S -f 129 -bu $mapping | intersectBed -abam -u -s -a stdin -b $miRNA | awk '{r[$4]++;}END{for(i in r)j++; print j;}'`
+
+        echo -e "R2_species\t$species2Mapped\t$species2Mapped_u\t$species2Mapped_m\t$species2piRNA\t$species25UTR\t$species2exon\t$species2intron\t$species23UTR\t$species2miRNA" >> ${mapping/.*/.stat}
+        ;;
+
+    CAGE|PAS|ChIPseq)
+        # require bed input
+        [[ "${mapping##*.}" == "bed|bed12" ]] || die "bed or bed12 format required!";
+        readsMapped=`grep -v "^#" $mapping | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        readsMapped_u=`grep -v "^#" $mapping | awk '{if($5==1) print}' | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        readsMapped_m=`grep -v "^#" $mapping | awk '{if($5>1) print}' | cut -f4 | uniq | sed 's/_/\t/g' | cut -f2 | addCols stdin`
+        speciesMapped=`grep -v "^#" $mapping | cut -f4 | uniq | wc -l`
+        speciesMapped_u=`grep -v "^#" $mapping | awk '{if($5==1) print}' | cut -f4 | uniq | wc -l`
+        speciesMapped_m=`grep -v "^#" $mapping | awk '{if($5>1) print}' | cut -f4 | uniq | wc -l`
+
+        # output
+        echo -e "type\ttotalMapping\ttotalMapping_u\ttotalMapping_m" > ${mapping/.*/.stat}
+        echo -e "reads\t$readsMapped\t$readsMapped_u\t$readsMapped_m" | sed 's/ /\t/g'>> ${mapping/.*/.stat}
+        echo -e "species\t$speciesMapped\t$speciesMapped_u\t$speciesMapped_m" | sed 's/ /\t/g'>> ${mapping/.*/.stat}
+        ;;
+    *)
+        echo "Unknown data type!"
+        exit 1
+        ;;
+esac

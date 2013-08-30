@@ -1,0 +1,54 @@
+#!/usr/bin/awk -f
+
+#
+# change
+# chr1	5152636	5152637	.	40	+	chr1	5068253	5074253	NM_133826	1000	+	chr1	5073253	5152630	NM_133826	1000	+	5152630	5152630	0	14	106,147,103,90,114,105,54,98,193,179,126,102,114,445,	0,1244,5836,10190,12442,14856,17897,34217,41104,49911,52639,60577,66775,78932,
+# to
+# chr1	5073253	5152637	NM_133826	1000	+	5152630	5152637	0	14	106,147,103,90,114,105,54,98,193,179,126,102,114,452,	0,1244,5836,10190,12442,14856,17897,34217,41104,49911,52639,60577,66775,78932,	7
+#
+# potential bug: if "d" is minus (the change is inwards), and |d| is larger than the size of the first exon, then blkSizes can contain '-'
+
+BEGIN{
+     OFS="\t";
+}
+{
+     chrom=$13
+     name=$16
+     strand=$18
+     blkCnt=$22
+     split($23,bs,",");
+     split($24,off,",");
+     blkStarts=""
+     blkSizes=""
+
+     if($25==0){
+          print chrom, $14, $15, name, 1000, strand, $19, $20, 0, blkCnt, $23,$24, 0, 0;
+          next;
+     }
+
+     if($6=="-") {
+          start=$2
+          end=$15
+          cdsStart=$2
+          cdsEnd=$20
+          d=$14-$2;
+
+          for(i=1;i<=blkCnt;i++){
+               blkSizes = blkSizes ((i==1)?(bs[i]+d):bs[i]) ",";
+               blkStarts = blkStarts ((i==1)?0:(off[i]+d)) ",";
+          }
+     }
+     if($6=="+") {
+          start=$14
+          end=$3
+          cdsStart=$19
+          cdsEnd=$3
+          d=$3-$15;
+
+          for(i=1;i<=blkCnt;i++){
+               blkSizes = blkSizes ((i==blkCnt)?(bs[i]+d):bs[i]) ",";
+               blkStarts = blkStarts off[i] ",";
+          }
+     }
+     print chrom, start, end, name, 1000, strand, cdsStart, cdsEnd, 0, blkCnt, blkSizes, blkStarts, $5, d;
+}

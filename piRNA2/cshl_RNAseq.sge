@@ -1,0 +1,91 @@
+###########################################
+## bash script for running RNAseq pipeline on cluster
+###########################################
+
+#!/bin/sh
+#$ -V
+#$ -pe single 8
+#$ -cwd
+#$ -o $HOME/sge_jobs_output/sge_job.$JOB_ID.out -j y
+#$ -S /bin/bash
+#$ -l mem_free=4G
+
+# usage:
+# qsub ~/projects/piRNA/src/cshl_RNAseq.sge mouseENCODEcshl_adult_wt_RNAseq_PE576t_strand_R1 R1.fastq.gz R2.fastq.gz
+# qsub ~/projects/piRNA/src/cshl_RNAseq.sge mouseENCODEcshl_adult_wt_RNAseq_PE576t_strand_R2 R1.fastq.gz R2.fastq.gz
+
+###########################################
+echo "############## 1. Configuring"
+###########################################
+
+samplename=$1 #mouse_adult_wt_RNAseq_PE50nt_strand_R2
+read1=$2 # R1.fastq
+read2=$3 # R2.fastq
+
+trinity_output=$HOME/nearline/Xin/RNAseq/$samplename/trinity.introns.bed #/home/wangj2/wnearline/xin_rnaseq/junc_pirna_cluster/Phil.Rnaseq.mouse_adult_testis.npa.trinity.blat.maplen95p.mm1p.allmap.introns.bed # intron in bed6
+
+export BOWTIE2_INDEXES=$GENOME/mm9/Sequence/Bowtie2Index/
+
+cpu=8
+
+export ANNOTATION=$GENOME/mm9/Annotation/Genes
+[ -d $HOME/scratch/ucsc ] || mkdir $HOME/scratch/ucsc
+[ -d $HOME/scratch/$samplename ] || mkdir -p $HOME/scratch/$samplename
+
+ln -fs $HOME/sge_jobs_output/sge_job.$JOB_ID.out $HOME/scratch/$samplename/sge2.log
+
+cd $HOME/nearline/Xin/others/mmENCODE/$samplename
+
+phred=`getphred $read1`; tophat_scoreoption=""; # default
+[ "$phred" == "Phred+64" ] && tophat_scoreoption="--solexa1.3-quals";
+[ "$phred" == "Solexa+64" ] && tophat_scoreoption="--solexa-quals";
+echo "tophat_scoreoption: $tophat_scoreoption"
+
+#############################################
+echo "################# 4. mapping"
+#############################################
+## mapped to genome using Tophat (incl. junctions)
+# run tophat here (unique mapper only)
+export BOWTIE2_INDEXES=$GENOME/mm9/Sequence/Bowtie2Index/
+tophat -o $HOME/scratch/$samplename $tophat_scoreoption --no-convert-bam -p $cpu --library-type fr-firststrand --min-anchor-length 8 --min-intron-length 30 --max-intron-length 50000 --splice-mismatches 1 --max-multihits 1 --no-coverage-search --keep-tmp genome_offrate3 $read1 $read2
+
+###########################################
+echo "############### 5. post-processing, format converting"
+###########################################
+cd $HOME/scratch/$samplename/
+## check & fix the XS:A tag (require: _fixXStag.awk under the same folder)
+_fixXStag -v libtype='fr-firststrand' -v save_discrepancy_to_file=discrepant_reads.sam accepted_hits.sam > _accepted_hits.sam
+
+##SAM->BAM->index
+samtools view -Sbut $BOWTIE2_INDEXES/genome.fai _accepted_hits.sam | samtools sort - accepted_hits.sorted
+mv accepted_hits.sorted.bam accepted_hits.bam
+samtools index accepted_hits.bam
+
+# make index for the (sorted) BAM
+cp accepted_hits.bam  $HOME/scratch/ucsc/$samplename.accepted_hits.bam
+cp accepted_hits.bam.bai  $HOME/scratch/ucsc/$samplename.accepted_hits.bam.bai
+
+
+###########################################
+echo "################# 6. assembly"
+###########################################
+
+cd $HOME/scratch/ucsc/
+
+## run cufflinks to get FPKM
+cufflinks -v --no-update-check --library-type fr-firststrand -o $HOME/scratch/$samplename/cufflinks2_o100 -p $cpu -g $ANNOTATION/genes.gtf -M $ANNOTATION/chrM.rRNA.tRNA.gtf $samplename.accepted_hits.bam -u -j 0.2 --min-frags-per-transfrag 40 --overlap-radius 100 2&> $HOME/scratch/$samplename/cufflinks2_o100.run.log
+
+# gtf of assembly
+echo "track name=${samplename}_o100 description=${samplename}_o100 visibility=pack colorByStrand='200,100,0 0,100,200'" > $HOME/scratch/ucsc/${samplename}_o100.transcripts.gtf
+cat $HOME/scratch/$samplename/cufflinks2_o100/transcripts.gtf >>  $HOME/scratch/ucsc/${samplename}_o100.transcripts.gtf
+gzip -f  $HOME/scratch/ucsc/${samplename}_o100.transcripts.gtf
+
+
+###########################################
+echo "############## 7. prepare for tracks files to display on UCSC"
+###########################################
+
+# bam -> bigwig
+bam2bw  $HOME/scratch/ucsc/$samplename.accepted_hits.bam
+
+echo "JOBDONE!";

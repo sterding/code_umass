@@ -1,0 +1,233 @@
+#!/bin/sh
+#$ -V
+#$ -pe single 8
+#$ -cwd
+#$ -o $HOME/sge_jobs_output/sge_job.$JOB_ID.out -j y
+#$ -S /bin/bash
+#$ -l mem_free=4G
+
+# qsub ~/projects/piRNA/src/junction_analysis.sh
+
+mapping_junction_reads ()
+{
+    outputdir=$1
+    filetype=$2
+    readsfile=$3
+    mismatch=$4
+    inputbed=$5
+    READS_MAPPED2GENOME_SAM=$6  #$HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/rnaseq_reads_mapped2genome.tab
+    FLANKING=200; HANGOVER=2;
+
+    echo "# makeing splicing site index ..."
+    # left splicing region (-200,+200) around left splicing site
+    [ -d $outputdir ] || mkdir $outputdir
+    export BOWTIE2_INDEXES=$GENOME/mm9/Sequence/Bowtie2Index/
+    bedToGenePred $inputbed stdout | genePredToGtf file stdin $outputdir/genes.gtf
+    oldpwd=$PWD
+    cd $outputdir
+    echo "#  Entering $outputdir ..."
+    # OLD VERSION
+    #tophat -o $inputdir/mapped2junction --no-convert-bam -p 8 --read-mismatches 2 --library-type fr-unstranded --min-anchor-length 2 --min-intron-length 10 --max-intron-length 50000 --splice-mismatches 1 --max-multihits 100 --coverage-search -G junctions2intron_extended.pi.gtf --transcriptome-index=transcriptome_data/junctions_pi --transcriptome-only --no-novel-juncs genome_offrate3 $readsfile
+    gtf_to_fasta genes.gtf $BOWTIE2_INDEXES/genome_offrate3.fa minigenome.fa
+    $HOME/bin/bowtie2-2.0.0-beta6/bowtie2-build -q minigenome.fa minigenome
+    echo "# mapping ..."
+    export BOWTIE2_INDEXES=$outputdir
+    echo "bowtie2 -x minigenome -p 8 $filetype -U $readsfile -k 100 --no-unal -S accepted_hits.sam"
+    $HOME/bin/bowtie2-2.0.0-beta6/bowtie2 -x minigenome -p 8 $filetype -U $readsfile -k 100 --no-unal -S accepted_hits.sam
+
+    echo "# extract all junction reads"
+    # reads perfectly aligned to the junction
+    awk -v fk=$FLANKING -v ho=$HANGOVER -v mm=$mismatch '{if($1!~/^@/ && $6~/^[0-9]+M$/ && match($0,"NM:i:[0-"mm"]\t") && $4<=(fk-ho) && $4+length($10)>=(fk+ho)) print;}' accepted_hits.sam > accepted_hits.junction.sam
+
+    if [ "$READS_MAPPED2GENOME_SAM" != "" ];
+    then
+        echo "# exclude reads mapped to genome (or splicing site?) with CIGAR line xxxM ..."
+        if [ ! -f $READS_MAPPED2GENOME_SAM ];
+        then
+            echo "# mapping reads to the whole genome (only report the best)..."
+            export BOWTIE2_INDEXES=$GENOME/mm9/Sequence/Bowtie2Index/  #(doesnot work because bowtie2 will look for current folder first)
+            #cd $BOWTIE2_INDEXES
+            echo "# running: $HOME/bin/bowtie2-2.0.0-beta6/bowtie2 -x genome -p 8 $filetype -U $readsfile -M 1 --no-unal --no-hd --no-sq -S $READS_MAPPED2GENOME_SAM"
+            $HOME/bin/bowtie2-2.0.0-beta6/bowtie2 -x genome -p 8 $filetype -U $readsfile -M 1 --no-hd --no-sq -S $READS_MAPPED2GENOME_SAM --un ${READS_MAPPED2GENOME_SAM/sam/unmapped.fq}
+            echo "# extracting reads unmapped to genome"
+            if [ "$filetype" == "-f" ]; then    # fasta
+                awk '{if(NR%2==1) print substr($1,2)}' ${READS_MAPPED2GENOME_SAM/sam/unmapped.fq} > ${READS_MAPPED2GENOME_SAM/sam/unmapped.tab}
+            elif [ "$filetype" == "-q" ]; then  # fastq
+                awk '{if(NR%4==1) print substr($1,2)}' ${READS_MAPPED2GENOME_SAM/sam/unmapped.fq} > ${READS_MAPPED2GENOME_SAM/sam/unmapped.tab}
+            fi
+
+            #echo "# extracting reads mapped to genome (with CIGAR line xxxM)"  # too slow
+            #awk -v mm=$mismatch '{if($1!~/^@/ && $6~/^[0-9]+M$/ && match($0,"NM:i:[0-"mm"]\t")) print $1}' $READS_MAPPED2GENOME_SAM | sort -u > ${READS_MAPPED2GENOME_SAM/sam/tab}
+        fi
+
+        echo "# intersect to get reads only mapped to junctions ..."
+        cut -f1 accepted_hits.junction.sam | sort -u | sort - ${READS_MAPPED2GENOME_SAM/sam/unmapped.tab} | uniq -d > accepted_hits.junction.only.tab
+        fgrep -w -f accepted_hits.junction.only.tab accepted_hits.junction.sam > accepted_hits.nogenomicmapper.sam
+
+        #echo "# filter out the reads mapped to genome"
+        ##fgrep -wv -f ${READS_MAPPED2GENOME_SAM/sam/tab} accepted_hits.junction.sam > accepted_hits.nogenomicmapper.sam  # too low
+        #cut -f1 accepted_hits.junction.sam | sort -u | sort -m ${READS_MAPPED2GENOME_SAM/sam/tab} - | uniq -d > accepted_hits.junction.mapped2genome.tab
+        #fgrep -vw -f accepted_hits.junction.mapped2genome.tab accepted_hits.junction.sam > accepted_hits.nogenomicmapper.sam
+
+        mv accepted_hits.junction.sam accepted_hits.includinggenomicmapper.sam
+        mv accepted_hits.nogenomicmapper.sam accepted_hits.junction.sam
+    fi
+
+    grep '>'  minigenome.fa | sed 's/>//g;s/ /\t/g' | sort -k1,1n > minigenome.fai
+    n=`wc -l minigenome.fai | awk '{print $1}'`
+
+    echo "# get reads count"
+    cut -f2-3 accepted_hits.junction.sam | awk -v n=$n '{and($1,0x10)?M[$2]++:P[$2]++;}END{OFS="\t";for(i=0;i<n;i++) print i,P[i]?P[i]:0, M[i]?M[i]:0;}' > junctions_pi.reads.tab
+    echo "# get species count"
+    cut -f2-4,6 accepted_hits.junction.sam | awk '{OFS="\t";$1=and($1,0x10)?"-":"+"; print;}' | sort -u | awk -v n=$n '{($1=="-")?M[$2]++:P[$2]++;}END{OFS="\t";for(i=0;i<n;i++) print i, P[i]?P[i]:0, M[i]?M[i]:0;}' > junctions_pi.species.tab
+    paste minigenome.fai junctions_pi.reads.tab junctions_pi.species.tab | cut -f3,5,6,8,9 | sort -k1,1 > junctions_pi.reads.species.tab
+    echo "# Entering $oldpwd"
+    cd $oldpwd
+    echo "# done"
+}
+
+
+export ANNOTATION=$GENOME/mm9/Annotation/Genes
+SPE_CUTOFF=1; REA_CUTOFF=1
+FLANKING=200
+HANGOVER=2
+
+inputdir=$HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand
+cd $inputdir
+ln -fs $HOME/sge_jobs_output/sge_job.$JOB_ID.out sge.log
+
+mappedreads=$HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/_accepted_hits.sam
+RNA_mappedreads=$HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/accepted_hits.bam
+smallRNA_mappedreads=$HOME/nearline/Xin/smallRNA/Jia/Phil.SRA.wt.ox.6wk.testes.raw.xkxh.norm.all0.bam
+
+#echo "# ======================================"
+#echo "# get junction reads from RNAseq Tophat output"
+#echo "# ======================================"
+
+##echo "# XS:A and only xxxxMxxxNxxxM (no deletion xxxxMxxxDxxxM), partition multi-mapped reads (using NH as score)"
+#awk '{OFS="\t"; if($0~/XS:A/ && $5>=3 && $6~/^[0-9]+M[0-9]+N[0-9]+M/) print}' $mappedreads | sam2bed -v bed12=T -v sCol=NH > junctions.tophat.bed12
+##awk '{OFS="\t"; if($1~/^@/ || ($0~/XS:A/ && $6~/[0-9]+M[0-9]+[ND][0-9]+M/)) print}' $mappedreads | sam2bed -v bed12=T > junctions.ND.bed12
+
+#echo "# ======================================"
+#echo "# get reads/species count for each junction"
+#echo "# ======================================"
+#
+#echo "## score is 1/N where N is number of multiple-maping"
+#awk '{OFS="\t";if($10==2){split($11,a,",");split($12,b,",");print $1,$2+a[1],$2+b[2],$1"_"$2"_"$3"_"$6, 1/$5,$6;}}' junctions.tophat.bed12 | sort -k1,1 -k2,2 -k3,3 -k6,6 -k4,4 > junctions.tophat.size.tab
+#
+#echo "## then, group by readsCount and speciesCount"
+## partition multi-mapped reads (using NH as score)
+#sort -k1,1 -k2,2n -k3,3n -k4,4 -k6,6 junctions.tophat.size.tab | groupBy -g 1,2,3,4,6 -c 5 -o sum | sort -k1,1 -k2,2n -k3,3n -k5,5 | groupBy -g 1,2,3,5 -c 6,4,4 -o sum,count,collapse > junctions.tophat.reads_species.tab
+### no partition
+##cut -f1-4,6 junctions.size.tab | sort | groupBy -g 1,2,3,4,5 -c 4 -o count | sort -k1,1 -k2,2n -k3,3n -k5,5 | groupBy -g 1,2,3,5 -c 4,6,4 -o count,sum,collapse > junctions.tophat.reads_species.tab
+
+#echo "# filter 'intron' with <REA_CUTOFF reads || <SPE_CUTOFF species, and round the score to integer"
+#awk -v spe=$SPE_CUTOFF -v rea=$REA_CUTOFF '{OFS="\t"; if($5>=spe && $6>=rea) print $1,$2,$3,"JUNCTION."NR,int($5+0.5),$4,$6;}' junctions.tophat.reads_species.tab > junctions2intron.bed
+## Tophat required junc format
+##awk -v spe=$SPE_CUTOFF -v rea=$REA_CUTOFF '{OFS="\t"; if($5>=spe && $6>=rea) print $1,$2-1,$3,$4}' junctions.speces_reads_stat.tab > junctions2intron.junc
+#
+#echo "# only introns in  piRNA cluster"
+#awk '{OFS="\t"; print $1,$2,$3,$4,0,$5}' ~/projects/piRNA/data/piRNA.clusters.coordinates.bed | intersectBed -a junctions2intron.bed -b stdin -wa -wb -s | awk '{OFS="\t";print $1,$2,$3,$4,$5,$6,$7,$11}' > junctions2intron.pi.tophat.bed
+
+## merge introns from Trinity
+#cat junctions2intron.pi.tophat.bed junctions2intron.pi.trinity.bed | cut -f1-4,6,8 | sort -k1,1 -k2,2n -k3,3n -k5,5 | groupBy -g 1,2,3,5,6 -c 4, -o collapse | awk '{OFS="\t"; s=$6;sub(/junc[0-9]+/,"Tri",s); sub(/JUNCTION.[0-9]+/,"Top",s); print $1,$2,$3,"JUNC"NR,0,$4,$5,s,$6}' | sort -k4,4 > junctions2intron.pi.bed
+## chr1	34874249	34874841	JUNC2	0	-	pi-Fam168b	Tri,Top	junc1,JUNCTION.911
+
+# junction track for UCSC
+
+
+#echo "# ======================================"
+#echo "# get donor-acceptor signal"
+#echo "# ======================================"
+#
+#awk -v fk=2 '{OFS="\t";left=($6=="+")?($2-2):($3-2); right=($6=="+")?($3-2):($2-2); print $1,left,left+4,$4,$5,$6;print $1,right,right+4,$4,$5,$6;}' junctions2intron.pi.bed | fastaFromBed -tab -s -name -fi $GENOME/mm9/Sequence/BowtieIndex/genome.fa -bed stdin -fo stdout | groupBy -g 1 -c 2 -o collapse | sort -k1,1 | awk '{OFS="\t";split($2,a,"");print $1,tolower(a[3])tolower(a[4])"-"tolower(a[6])tolower(a[7]), toupper(a[1])toupper(a[2])"("tolower(a[3])tolower(a[4])"-"tolower(a[6])tolower(a[7])")"toupper(a[8])toupper(a[9]);}' > junctions2intron.pi.intronsignal.tab
+#
+#echo "# ======================================"
+#echo "##### map smallRNA/RNAseq reads to the splicing sites"
+#echo "# ======================================"
+#
+## left + right splicing site
+#awk -v fk=$FLANKING '{OFS="\t"; flanking=($2>fk)?fk:$2; print $1,$2-flanking,$2+flanking,$4"_1", $5,$6; flanking=($3>fk)?fk:$3; print $1,$3-flanking,$3+flanking,$4"_2", $5,$6;}' junctions2intron.pi.bed > junctions2intron.pi.splicing.bed
+#
+#################################
+#echo "## map RNAseq reads to splicing sites ..."
+#################################
+#readsfile=$HOME/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004_R1.fq
+#mapping_junction_reads mapped2splicing_rnaseq -q $readsfile 1 junctions2intron.pi.splicing.bed
+#awk 'BEGIN{FS="\t";OFS="\t";}{print $1,$3,$2,$5,$4}' mapped2splicing_rnaseq/junctions_pi.reads.species.tab > junctions2intron.pi.mapped2splicing_rnaseq_1.bed
+#
+#readsfile=$HOME/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004_R2.fq
+#mapping_junction_reads mapped2splicing_rnaseq -q $readsfile 1 junctions2intron.pi.splicing.bed
+#cp mapped2splicing_rnaseq/junctions_pi.reads.species.tab junctions2intron.pi.mapped2splicing_rnaseq_2.bed
+#paste junctions2intron.pi.mapped2splicing_rnaseq_1.bed junctions2intron.pi.mapped2splicing_rnaseq_2.bed | awk 'BEGIN{FS="\t";OFS="\t";}{print $1,$2+$7,$3+$8,$4+$9,$5+$10}' | sed 's/_/\t/g' | sort -k1,1 | groupBy -g 1 -c 3,4,5,6 -o sum,sum,sum,sum > junctions2intron.pi.mapped2splicing_rnaseq.bed
+#
+#################################
+#echo "## map piRNA reads to splicing site ..."
+#################################
+#readsfile=$HOME/nearline/Xin/smallRNA/Jia/Phil.SRA.wt.ox.6wk.testes.raw.uniq.reads.fa.gz
+#mapping_junction_reads mapped2splicing_pirna -f $readsfile 1 junctions2intron.pi.splicing.bed
+#sed 's/_/\t/g' mapped2splicing_pirna/junctions_pi.reads.species.tab | sort -k1,1 | groupBy -g 1 -c 3,4,5,6 -o sum,sum,sum,sum > junctions2intron.pi.mapped2splicing_pirna.bed
+
+echo "# ======================================"
+echo "##### map smallRNA/RNAseq reads to the junctions"
+echo "# ======================================"
+
+echo "# extend it to bed12"
+awk -v fk=$FLANKING '{OFS="\t"; flanking=($2>fk)?fk:$2; print $1,$2-flanking,$3+flanking,$4, $5,$6,$2-flanking,$3+flanking,"255,0,0",2,flanking","flanking,"0,"(flanking+$3-$2);}' junctions2intron.pi.bed > junctions2intron_extended.pi.bed
+
+################################
+echo "# map RNAseq reads to junction ..."
+################################
+
+# bowtie2 does not support gz for -U, so do this first
+# zcat Adult_testis_NoIndex_L004_R1*.gz > Adult_testis_NoIndex_L004_R1.fq;  zcat Adult_testis_NoIndex_L004_R2*.gz > Adult_testis_NoIndex_L004_R2.fq;
+# or
+# zcat ~/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004_*.gz | sed 's/ /\//g' > ~/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004.fq &
+
+# since PE50 is from fr-firststrand, so /1 is from antisense-strand, and /2 is from sense strand.
+readsfile=$HOME/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004_R1.fq
+mapping_junction_reads mapped2junction_rnaseq -q $readsfile 1 junctions2intron_extended.pi.bed $HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/mapped2genome_rnaseq_accepted_hits_R1.sam
+awk 'BEGIN{FS="\t";OFS="\t";}{print $1,$3,$2,$5,$4}' mapped2junction_rnaseq/junctions_pi.reads.species.tab > mapped2junction_rnaseq/junctions2intron.pi.mapped2junction_rnaseq_1.bed
+
+readsfile=$HOME/nearline/Xin/RNAseq/mouse_adult_wt_RNAseq_PE50nt_strand/Adult_testis_NoIndex_L004_R2.fq
+mapping_junction_reads mapped2junction_rnaseq -q $readsfile 1 junctions2intron_extended.pi.bed $HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/mapped2genome_rnaseq_accepted_hits_R2.sam
+cp mapped2junction_rnaseq/junctions_pi.reads.species.tab mapped2junction_rnaseq/junctions2intron.pi.mapped2junction_rnaseq_2.bed
+paste mapped2junction_rnaseq/junctions2intron.pi.mapped2junction_rnaseq_1.bed mapped2junction_rnaseq/junctions2intron.pi.mapped2junction_rnaseq_2.bed | awk 'BEGIN{FS="\t";OFS="\t";}{print $1,$2+$7,$3+$8,$4+$9,$5+$10}' > junctions2intron.pi.mapped2junction_rnaseq.bed
+
+################################
+echo "# map smallRNA reads to junction ..."
+################################
+
+readsfile=$HOME/nearline/Xin/smallRNA/Jia/Phil.SRA.wt.ox.6wk.testes.raw.uniq.reads.fa.gz
+mapping_junction_reads mapped2junction_pirna -f $readsfile 1 junctions2intron_extended.pi.bed $HOME/scratch/mouse_adult_wt_RNAseq_PE50nt_strand/mapped2genome_pirna_accepted_hits.sam
+paste mapped2junction_pirna/junctions_pi.reads.species.tab > junctions2intron.pi.mapped2junction_pirna.bed
+
+#echo "# ======================================"
+#echo "##### map smallRNA/RNAseq reads to the flanking exons and intron"
+#echo "# ======================================"
+#
+## get the flanking region
+#cat junctions2intron.pi.bed | flankBed -i stdin -g $ANNOTATION/ChromInfo.txt -l $FLANKING -r 0 > junctions2intron.pi.LEFT.bed
+#cat junctions2intron.pi.bed | flankBed -i stdin -g $ANNOTATION/ChromInfo.txt -r $FLANKING -l 0 > junctions2intron.pi.RIGHT.bed
+#
+#echo "# RNAseq reads mapped to intron/exon"
+#
+#samtools view -uF 0x4 $RNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.LEFT.bed  | sort -k4,4 | cut -f4,10,13 > junctions2intron.pi.LEFT.rnaseq.tab
+#samtools view -uF 0x4 $RNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.bed  | sort -k4,4 | cut -f4,10,13 > junctions2intron.pi.INTRON.rnaseq.tab
+#samtools view -uF 0x4 $RNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.RIGHT.bed | sort -k4,4  | cut -f4,10,13 > junctions2intron.pi.INTRON.rnaseq.tab
+## ======================================
+#echo "# smallRNA reads mapped to intron/exon"
+## ======================================
+#samtools view -uF 0x4 $smallRNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.LEFT.bed  | sort -k4,4 | cut -f4,10,13 > junctions2intron.pi.LEFT.pirna.tab
+#samtools view -uF 0x4 $smallRNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.bed  | sort -k4,4 | cut -f4,10,13 > junctions2intron.pi.INTRON.pirna.tab
+#samtools view -uF 0x4 $smallRNA_mappedreads | bedtools coverage -abam -s -split -a stdin -b junctions2intron.pi.RIGHT.bed | sort -k4,4 | cut -f4,10,13 > junctions2intron.pi.RIGHT.pirna.tab
+
+echo "## merge together"
+
+sort -k4,4 junctions2intron.pi.bed | paste - junctions2intron.pi.intronsignal.tab junctions2intron.pi.mapped2junction_rnaseq.bed junctions2intron.pi.mapped2junction_pirna.bed junctions2intron.pi.mapped2splicing_rnaseq.bed junctions2intron.pi.mapped2splicing_pirna.bed junctions2intron.pi.LEFT.rnaseq.tab junctions2intron.pi.INTRON.rnaseq.tab junctions2intron.pi.INTRON.rnaseq.tab junctions2intron.pi.LEFT.pirna.tab junctions2intron.pi.INTRON.pirna.tab junctions2intron.pi.RIGHT.pirna.tab | sort -k1,1 -k2,2n -k3,3n | cut -f1-9,11-12,14-17,19-22,24-27,29-32,34,35,37,38,40,41,43,44,46,47,49,50 > junctions2intron.pi.final.tab
+
+echo "## into bed format"
+echo "track name=piRNA_junctions description=\"junctions2intron.pi.final.tab with RNAseq reads >0\" useScore=1 visibility=pack itemRgb=On" > mouse_adult_wt_RNAseq_PE50nt_strand.junctions2intron.pi.final.bed
+awk -v fk=200 '{OFS="\t"; if(NR<2) next; flanking=($2>fk)?fk:$2; if($12>0) print $1,$2-flanking,$3+flanking,$4, $12,$6,$2-flanking,$3+flanking,($8=="Tri,Top")?"255,0,0":(($8=="Top")?"0,100,0":"255,0,255"),2,flanking","flanking,"0,"(flanking+$3-$2);}' /home/dongx/projects/piRNA/data/junctions2intron.pi.final.merged.tab >> mouse_adult_wt_RNAseq_PE50nt_strand.junctions2intron.pi.final.bed
+scp mouse_adult_wt_RNAseq_PE50nt_strand.junctions2intron.pi.final.bed zlab:~/public_html/tracks/RNAseq
+echo " ======= DONE =========="

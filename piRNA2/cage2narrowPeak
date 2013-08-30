@@ -1,0 +1,48 @@
+#!/bin/awk -f
+
+# input format is from mergeBed output, like
+#chr1	3308715	3308718	chr1:3308715-3308716;chr1:3308717-3308718	3,1
+#chr1	3309588	3309595	chr1:3309588-3309589;chr1:3309593-3309595	1,1
+#chr1	3309865	3309866	chr1:3309865-3309866	1
+#chr1	3462360	3462437	chr1:3462360-3462361;chr1:3462361-3462362;chr1:3462368-3462369;chr1:3462370-3462371;chr1:3462371-3462372;chr1:3462374-3462375;chr1:3462380-3462383;chr1:3462383-3462384;chr1:3462384-3462385;chr1:3462385-3462386;chr1:3462386-3462387;chr1:3462388-3462389;chr1:3462390-3462391;chr1:3462392-3462393;chr1:3462394-3462395;chr1:3462395-3462396;chr1:3462396-3462397;chr1:3462397-3462398;chr1:3462399-3462400;chr1:3462401-3462402;chr1:3462407-3462408;chr1:3462415-3462416;chr1:3462418-3462419;chr1:3462434-3462435;chr1:3462435-3462436;chr1:3462436-3462437	4,9,2,1,2,8,1,17,1,6,1,1,3,4,6,1,3,2,1,4,4,4,1,1,2,11
+# output is narrowpeak format
+# kurtosis/skewness calculation refers to http://dada.perl.it/shootout/gawk_allsrc.html
+
+{
+    OFS="\t";
+    split($4,a,";");
+    split($5,b,",");
+    SUM=0; max=0; imax=0; skew=0; kurt=0; offset=0; n=0; sum=0;
+    for(i=1;i<=length(b);i++)
+    {
+        SUM+=b[i];
+        split(a[i], start, ":|-");
+        for(j=1;j<=b[i];j++) {nums[n++]=start[2]; sum+=start[2];}
+        if(b[i]>max) {max=b[i]; imax=i}
+    }
+    # til here, n should be equal to SUM
+    if(n==1) next;
+    # calculate kurtosis/skewness
+    mean = sum/n;
+    for (num in nums) {
+        dev = nums[num] - mean;
+        if (dev > 0) { avg_dev += dev; } else { avg_dev -= dev; }
+        vari += dev^2;
+        skew += dev^3;
+        kurt += dev^4;
+    }
+    avg_dev /= n;
+    vari /= (n - 1);
+    std_dev = sqrt(vari);
+
+    if (vari > 0) {
+        skew /= (n * vari * std_dev);
+        kurt = kurt/(n * vari * vari) - 3.0;
+    }
+
+    split(a[imax], c, ":|-");
+    offset=c[2]-$2;
+
+    if(strand=="minus") printf("%s\t%d\t%d\t%s\t%d\t%s\t%d\t%f\t%f\t%d\n", $1,$2,$3,"TC_m"NR, max,"-",SUM,skew,kurt,offset);
+    if(strand=="plus") printf("%s\t%d\t%d\t%s\t%d\t%s\t%d\t%f\t%f\t%d\n", $1,$2,$3,"TC_p"NR, max,"+",SUM,skew,kurt,offset);
+}
